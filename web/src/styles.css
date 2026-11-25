@@ -17,7 +17,7 @@
   }
   h1 { @apply text-3xl font-semibold tracking-tight leading-tight; }
   h2 { @apply text-base font-semibold tracking-tight; }
-  input {
+  input:where(:not([type='checkbox'])) {
     @apply min-w-0 w-full min-h-11 rounded-lg border border-line bg-surface px-3 text-base text-ink outline-none;
   }
   input::placeholder { @apply text-muted; }
@@ -75,7 +75,8 @@
   .room-clock { @apply text-sm tabular-nums text-muted; }
   .seek-form { @apply grid grid-cols-[minmax(0,1fr)_auto] items-center gap-2; }
   .form-error { @apply border-l-2 border-[#88584d] pl-3 text-sm leading-relaxed text-[#633830]; }
-  .invite { @apply grid gap-1 border-t border-line pt-4; }
+  .invite { @apply grid gap-3 border-t border-line pt-4; }
+  .invite-row { @apply py-2; }
 
   @media (min-width: 640px) {
     .shell { @apply px-6; }

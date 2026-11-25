@@ -10,7 +10,7 @@ type Mode = 'loading' | 'ready' | 'enabled' | 'blocked' | 'failed'
 type Props = {
   state: RoomState
   serverNow: () => number
-  host: boolean
+  canControl: boolean
   connected: boolean
   send: (command: Command) => boolean
 }
@@ -23,7 +23,7 @@ function clock(sec: number) {
   return h ? `${h}:${String(m).padStart(2, '0')}:${s}` : `${m}:${s}`
 }
 
-function RoomPlayback({ state, serverNow, duration, connected, play, send }: Omit<Props, 'host'> & {
+function RoomPlayback({ state, serverNow, duration, connected, play, send }: Omit<Props, 'canControl'> & {
   duration: number
   play: () => void
 }) {
@@ -66,14 +66,14 @@ function RoomPlayback({ state, serverNow, duration, connected, play, send }: Omi
   )
 }
 
-export function Player({ state, serverNow, host, connected, send }: Props) {
+export function Player({ state, serverNow, canControl, connected, send }: Props) {
   const type = state.source.type
   const uri = type === 'youtube' ? state.source.videoId : state.source.url
   const video = useRef<HTMLVideoElement>(null)
   const youtube = useRef<HTMLDivElement>(null)
   const player = useRef<MediaPlayer | null>(null)
   const snapshot = useRef(state)
-  const controls = useRef({ host, connected, send })
+  const controls = useRef({ canControl, connected, send })
   const pendingPlayback = useRef<{ paused: boolean; revision: number; expiresAt: number } | null>(null)
   const modeRef = useRef<Mode>('loading')
   const [mode, setMode] = useState<Mode>('loading')
@@ -105,14 +105,14 @@ export function Player({ state, serverNow, host, connected, send }: Props) {
   }, [serverNow])
 
   useLayoutEffect(() => {
-    controls.current = { host, connected, send }
-    if (!connected || !host) pendingPlayback.current = null
-  }, [host, connected, send])
-
-  useLayoutEffect(() => {
+    const revoked = controls.current.canControl && !canControl
+    const disconnectedWithPending = !connected && pendingPlayback.current !== null
+    const stateChanged = snapshot.current !== state
+    controls.current = { canControl, connected, send }
     snapshot.current = state
-    sync(true)
-  }, [state, sync])
+    if (!connected || !canControl) pendingPlayback.current = null
+    if (stateChanged || revoked || disconnectedWithPending) sync(true)
+  }, [state, canControl, connected, send, sync])
 
   useEffect(() => {
     let close: (() => void) | undefined
@@ -148,8 +148,8 @@ export function Player({ state, serverNow, host, connected, send }: Props) {
         sync(immediate)
       },
       playbackChanged(paused: boolean) {
-        const { host, connected, send } = controls.current
-        if (!host || !connected || !player.current) return
+        const { canControl, connected, send } = controls.current
+        if (!canControl || !connected || !player.current) return
         const current = snapshot.current
         if (paused === (pendingPlayback.current?.paused ?? current.paused)) return
         if (send({ type: paused ? 'pause' : 'play' })) {
@@ -199,12 +199,12 @@ export function Player({ state, serverNow, host, connected, send }: Props) {
       ? 'Браузер заблокировал запуск. Нажмите «Смотреть» или кнопку воспроизведения в самом плеере YouTube.'
       : 'Браузер заблокировал звук. Нажмите «Смотреть» ещё раз.'
   } else if (mode === 'ready') {
-    note = host ? 'Воспроизведение и пауза в плеере действуют на всю комнату.'
+    note = canControl ? 'Воспроизведение и пауза в плеере действуют на всю комнату.'
       : 'Нажмите, чтобы разрешить воспроизведение со звуком.'
   } else if (mode === 'enabled') {
     note = !connected ? 'Синхронизация возобновится после подключения.'
-      : host ? 'Воспроизведение и пауза в плеере действуют на всю комнату. Для общей перемотки используйте кнопки ниже.'
-        : state.paused ? 'Пауза. Воспроизведением управляет ведущий.' : 'Воспроизведение синхронизировано с комнатой.'
+      : canControl ? 'Воспроизведение и пауза в плеере действуют на всю комнату. Для общей перемотки используйте кнопки ниже.'
+        : state.paused ? 'Воспроизведение в комнате на паузе.' : 'Воспроизведение синхронизировано с комнатой.'
   }
 
   return (
@@ -219,7 +219,7 @@ export function Player({ state, serverNow, host, connected, send }: Props) {
         {(mode === 'ready' || mode === 'blocked') && <button type="button" className="button primary" onClick={activate}><PlayIcon aria-hidden="true" />Смотреть</button>}
         <p aria-live="polite">{note}</p>
       </div>}
-      {host && <RoomPlayback {...{ state, serverNow, duration, connected, play, send }} />}
+      {canControl && <RoomPlayback {...{ state, serverNow, duration, connected, play, send }} />}
     </section>
   )
 }

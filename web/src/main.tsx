@@ -3,7 +3,8 @@ import { useEffect, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
 import { createRoot } from 'react-dom/client'
 import { Player } from './Player'
-import { createRoom, errorText, hostKey, useRoom } from './room'
+import { createRoom, errorText, useRoom } from './room'
+import type { Invitation } from './room'
 import './styles.css'
 
 function VideoLink({ id, value, onChange, disabled }: { id: string; value: string; onChange: (value: string) => void; disabled: boolean }) {
@@ -51,8 +52,17 @@ function CreateRoom() {
   )
 }
 
-function Invite({ roomId }: { roomId: string }) {
-  const link = new URL(`/r/${encodeURIComponent(roomId)}`, location.origin).href
+function Invite({ roomId, invitation, connected, setControl }: {
+  roomId: string
+  invitation: Invitation
+  connected: boolean
+  setControl: (canControl: boolean) => void
+}) {
+  const { number, token, canControl } = invitation
+  const url = new URL(`/r/${encodeURIComponent(roomId)}`, location.origin)
+  url.searchParams.set('invite', token)
+  const link = url.href
+  const nameId = `guest-${number}`
   const [result, setResult] = useState<'copied' | 'manual'>()
   const input = useRef<HTMLInputElement>(null)
 
@@ -76,15 +86,23 @@ function Invite({ roomId }: { roomId: string }) {
   }
 
   return (
-    <div className="invite">
-      <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
-        <button type="button" className="button" onClick={copy}><ClipboardCopyIcon aria-hidden="true" />Скопировать приглашение</button>
+    <li className="invite-row">
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
+        <span id={nameId} className="font-semibold">Гость {number}</span>
+        <label className="inline-flex min-h-11 items-center gap-2 text-sm">
+          <input type="checkbox" className="size-4 shrink-0 accent-accent" aria-describedby={nameId}
+            checked={canControl} disabled={!connected} onChange={(event) => setControl(event.target.checked)} />
+          Может управлять видео
+        </label>
+        <button type="button" className="button" onClick={copy} aria-describedby={nameId}>
+          <ClipboardCopyIcon aria-hidden="true" />Скопировать ссылку
+        </button>
         {result === 'copied' && <span className="help" role="status">Ссылка скопирована</span>}
       </div>
       {result === 'manual' && <label className="mt-2 grid gap-1.5 text-sm">Скопируйте ссылку вручную
         <input ref={input} readOnly value={link} onFocus={(event) => event.currentTarget.select()} />
       </label>}
-    </div>
+    </li>
   )
 }
 
@@ -93,27 +111,22 @@ const connection = {
 }
 const sourceNames = { youtube: 'YouTube', mp4: 'Прямой MP4', hls: 'HLS-запись' }
 
-function Room({ roomId }: { roomId: string }) {
-  const { status, state, role, serverNow, error, send } = useRoom(roomId)
+function Room({ roomId, inviteToken }: { roomId: string; inviteToken: string | null }) {
+  const { status, state, role, canControl, guestNumber, invitations, serverNow, error, send } = useRoom(roomId, inviteToken)
   const [url, setUrl] = useState('')
   const connected = status === 'connected'
   const host = role === 'host'
 
-  function viewOnly() {
-    sessionStorage.removeItem(hostKey(roomId))
-    location.reload()
-  }
-
   function load(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
-    if (connected) send({ type: 'load', url: url.trim() })
+    if (host && connected) send({ type: 'load', url: url.trim() })
   }
 
   return (
     <main className="room-layout" id="main">
       <div className="room-heading">
         <div className="mb-3 flex flex-wrap items-center gap-2">
-          {role && status !== 'closed' && <span className="pill">{host ? 'Ведущий' : 'Зритель'}</span>}
+          {role && status !== 'closed' && <span className="pill">{host ? 'Ведущий' : `Гость ${guestNumber}`}</span>}
           <span className="connection" role="status" data-connected={connected}><i aria-hidden="true" />{connection[status]}</span>
         </div>
         <h1>Комната просмотра</h1>
@@ -122,13 +135,12 @@ function Room({ roomId }: { roomId: string }) {
       {status === 'closed' ? (
         <div className="room-unavailable">
           <p className="form-error" role="alert">{errorText(error ?? 'room_not_found')}</p>
-          {error === 'invalid_host_token' ? <button className="button" type="button" onClick={viewOnly}>Открыть как зритель</button>
-            : <a className="button" href="/">Создать новую комнату</a>}
+          <a className="button" href="/">Создать новую комнату</a>
         </div>
       ) : state ? (
         <>
           <Player key={state.source.type === 'youtube' ? `youtube:${state.source.videoId}` : `${state.source.type}:${state.source.url}`}
-            {...{ state, serverNow, host, connected, send }} />
+            {...{ state, serverNow, canControl, connected, send }} />
           {error && <p className="form-error" role="alert">{errorText(error)}</p>}
           {host && <>
             <form className="source-form" onSubmit={load}>
@@ -138,7 +150,18 @@ function Room({ roomId }: { roomId: string }) {
                 <button className="button" type="submit" disabled={!connected}>Загрузить</button>
               </div>
             </form>
-            <Invite roomId={roomId} />
+            <section className="invite" aria-labelledby="invite-heading">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <h2 id="invite-heading">Приглашения</h2>
+                <button className="button" type="button" disabled={!connected} onClick={() => send({ type: 'create_invitation' })}>Создать приглашение</button>
+              </div>
+              {invitations?.length ? (
+                <ul className="divide-y divide-line" role="list">
+                  {invitations.map((invitation) => <Invite key={invitation.number} {...{ roomId, invitation, connected }}
+                    setControl={(canControl) => send({ type: 'set_guest_control', guestNumber: invitation.number, canControl })} />)}
+                </ul>
+              ) : <p className="help">Создайте отдельную ссылку для каждого гостя.</p>}
+            </section>
           </>}
         </>
       ) : (
@@ -151,7 +174,7 @@ function Room({ roomId }: { roomId: string }) {
 }
 
 function App() {
-  const { pathname } = location
+  const { pathname, search } = location
   const roomId = /^\/r\/([\w-]+)\/?$/.exec(pathname)?.[1]
   return (
     <div className="shell">
@@ -161,7 +184,7 @@ function App() {
           <span className="brand-mark"><PlayIcon aria-hidden="true" /></span><span>Share Video</span>
         </a>
       </header>
-      {roomId ? <Room roomId={roomId} /> : pathname === '/' ? <CreateRoom /> : (
+      {roomId ? <Room roomId={roomId} inviteToken={new URLSearchParams(search).get('invite')} /> : pathname === '/' ? <CreateRoom /> : (
         <main className="room-layout" id="main">
           <h1>Страница не найдена</h1>
           <p className="subtitle">Проверьте, полностью ли скопировано приглашение.</p>

@@ -18,7 +18,7 @@ use tokio::{
 };
 use tower_http::{services::{ServeDir, ServeFile}, set_header::SetResponseHeaderLayer};
 
-use rooms::{Admission, ClientMessage, CreateFailure, Rooms, ServerMessage, WireError, encode};
+use rooms::{Admission, ClientMessage, CreateFailure, Rooms, ServerMessage, Update, WireError, encode};
 use source::Source;
 
 const MAX_MESSAGE_BYTES: usize = 8192;
@@ -181,19 +181,19 @@ async fn serve_socket(mut socket: WebSocket, rooms: Arc<Rooms>, room_id: String)
         Ok(Some(Ok(message))) => message,
         _ => return,
     };
-    let host_token = match first {
+    let (host_token, guest_token) = match first {
         Message::Text(text) => match serde_json::from_str(text.as_str()) {
-            Ok(ClientMessage::Join { host_token }) => host_token,
+            Ok(ClientMessage::Join { host_token, guest_token }) => (host_token, guest_token),
             _ => return close_with_error(&mut socket, WireError::INVALID_MESSAGE).await,
         },
         Message::Close(_) => return,
         _ => return close_with_error(&mut socket, WireError::INVALID_MESSAGE).await,
     };
-    let Admission { participant, mut updates, snapshot } = match rooms.join(room_id, host_token.as_deref()) {
+    let Admission { participant, mut updates, snapshot } = match rooms.join(room_id, host_token.as_deref(), guest_token.as_deref()) {
         Ok(admission) => admission,
         Err(error) => return close_with_error(&mut socket, error).await,
     };
-    drop(host_token);
+    drop((host_token, guest_token));
     if !send(&mut socket, snapshot).await {
         return;
     }
@@ -236,11 +236,15 @@ async fn serve_socket(mut socket: WebSocket, rooms: Arc<Rooms>, room_id: String)
                 }
             }
             update = updates.recv() => match update {
-                Ok(update) => Some(update),
+                Ok(Update::Playback(text)) => Some(text),
+                Ok(Update::AccessChanged) => Some(participant.access()),
                 Err(RecvError::Lagged(_)) => {
-                    let (fresh, snapshot) = participant.resync();
+                    let (fresh, access, state) = participant.resync();
                     updates = fresh;
-                    Some(snapshot)
+                    if !send(&mut socket, access).await {
+                        break;
+                    }
+                    Some(state)
                 }
                 Err(RecvError::Closed) => break,
             }

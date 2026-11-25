@@ -8,24 +8,39 @@ export type RoomState = {
   updatedAtMs: number
   revision: number
 }
-export type Command = { type: 'load'; url: string } | { type: 'play' | 'pause' } | { type: 'seek'; positionSec: number }
-type RoomRole = 'host' | 'viewer'
+export type Command = { type: 'play' | 'pause' } | { type: 'seek'; positionSec: number }
+type HostCommand = { type: 'load'; url: string }
+  | { type: 'create_invitation' }
+  | { type: 'set_guest_control'; guestNumber: number; canControl: boolean }
+type RoomRole = 'host' | 'guest'
+export type Invitation = { number: number; token: string; canControl: boolean }
+type Access = { canControl: boolean; guestNumber?: number; invitations?: Invitation[] }
 type RoomError = { type: 'error'; code: string }
 type Message = RoomError
   | { type: 'pong'; clientNowMs: number; serverNowMs: number }
-  | { type: 'joined'; role: RoomRole; state: RoomState; serverNowMs: number }
+  | ({ type: 'joined'; role: RoomRole; state: RoomState; serverNowMs: number } & Access)
+  | ({ type: 'access' } & Access)
   | { type: 'state'; state: RoomState; serverNowMs: number }
 type Status = 'connecting' | 'connected' | 'reconnecting' | 'offline' | 'closed'
 
-export const hostKey = (roomId: string) => `share-video:host:${roomId}`
+const hostKey = (roomId: string) => `share-video:host:${roomId}`
 const now = () => performance.timeOrigin + performance.now()
+
+export function joinMessage(inviteToken: string | null, readHostToken: () => string | null) {
+  if (inviteToken !== null) return { type: 'join', guestToken: inviteToken }
+  const hostToken = readHostToken()
+  return hostToken ? { type: 'join', hostToken } : null
+}
 
 export function errorText(code: string): string {
   switch (code) {
     case 'invalid_source': return 'Эта ссылка не поддерживается. Вставьте ссылку YouTube или прямую HTTPS-ссылку на MP4 или HLS (.m3u8).'
     case 'room_not_found': return 'Комната больше недоступна. Попросите ведущего прислать новое приглашение.'
-    case 'invalid_host_token': return 'Права ведущего не подтверждены. Вы можете открыть комнату как зритель.'
-    case 'forbidden': return 'Только ведущий может менять воспроизведение в комнате.'
+    case 'invalid_host_token': return 'Права ведущего не подтверждены. Для входа в комнату нужно приглашение.'
+    case 'invalid_guest_token': return 'Для входа в комнату нужна действующая ссылка-приглашение. Попросите её у ведущего.'
+    case 'forbidden': return 'У вас нет прав на это действие.'
+    case 'invitation_capacity': return 'Достигнут лимит приглашений для этой комнаты.'
+    case 'invitation_not_found': return 'Приглашение не найдено.'
     case 'invalid_message': return 'Сервер не принял команду.'
     case 'room_capacity': return 'Сервер занят. Попробуйте создать комнату чуть позже.'
     case 'offline': return 'Нет подключения к интернету.'
@@ -56,21 +71,28 @@ export async function createRoom(url: string): Promise<string> {
   return data.roomId
 }
 
-export function useRoom(roomId: string) {
+export function useRoom(roomId: string, inviteToken: string | null) {
   const [status, setStatus] = useState<Status>(() => navigator.onLine ? 'connecting' : 'offline')
   const [state, setState] = useState<RoomState>()
   const [role, setRole] = useState<RoomRole>()
+  const [access, setAccess] = useState<Access>({ canControl: false })
   const [error, setError] = useState<string>()
   const socketRef = useRef<WebSocket | null>(null)
   const offset = useRef(0)
   const serverNow = useCallback(() => now() + offset.current, [])
 
   useEffect(() => {
-    let token: string | undefined
-    try {
-      token = sessionStorage.getItem(hostKey(roomId)) ?? undefined
-    } catch {
-      // A browser blocking storage can still join as a viewer.
+    const join = joinMessage(inviteToken, () => {
+      try {
+        return sessionStorage.getItem(hostKey(roomId))
+      } catch {
+        return null
+      }
+    })
+    if (!join) {
+      setError('invalid_guest_token')
+      setStatus('closed')
+      return
     }
     const url = new URL(`/api/rooms/${encodeURIComponent(roomId)}/ws`, location.origin)
     url.protocol = location.protocol === 'https:' ? 'wss:' : 'ws:'
@@ -110,7 +132,7 @@ export function useRoom(roomId: string) {
       }
 
       socket.onopen = () => {
-        if (socketRef.current === socket) socket.send(JSON.stringify({ type: 'join', hostToken: token }))
+        if (socketRef.current === socket) socket.send(JSON.stringify(join))
       }
       socket.onmessage = (event) => {
         if (socketRef.current !== socket || typeof event.data !== 'string') return
@@ -129,6 +151,7 @@ export function useRoom(roomId: string) {
             offset.current = message.serverNowMs - lastMessage
             revision = message.state.revision
             setRole(message.role)
+            setAccess(message)
             setState(message.state)
             setError(undefined)
             setStatus('connected')
@@ -139,6 +162,9 @@ export function useRoom(roomId: string) {
               if (now() - lastMessage > 20_000) socket.close()
               else ping()
             }, 5000)
+            break
+          case 'access':
+            if (joined) setAccess(message)
             break
           case 'state':
             if (joined && message.state.revision > revision) {
@@ -157,7 +183,7 @@ export function useRoom(roomId: string) {
           }
           case 'error':
             setError(message.code)
-            if (message.code === 'room_not_found' || message.code === 'invalid_host_token') {
+            if (!joined || message.code === 'room_not_found') {
               terminal = true
               disconnect()
               setStatus('closed')
@@ -197,9 +223,9 @@ export function useRoom(roomId: string) {
       window.clearTimeout(retryTimer)
       disconnect()
     }
-  }, [roomId])
+  }, [roomId, inviteToken])
 
-  function send(command: Command): boolean {
+  function send(command: Command | HostCommand): boolean {
     const socket = socketRef.current
     if (status !== 'connected' || !socket || socket.readyState !== WebSocket.OPEN) return false
     setError(undefined)
@@ -207,5 +233,6 @@ export function useRoom(roomId: string) {
     return true
   }
 
-  return { status, state, role, serverNow, error, send }
+  const { canControl, invitations, guestNumber } = access
+  return { status, state, role, canControl, invitations, guestNumber, serverNow, error, send }
 }
