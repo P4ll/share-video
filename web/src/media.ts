@@ -102,7 +102,7 @@ export function mountYouTube(container: HTMLElement, videoId: string, events: Me
     if (disposed) return
     const url = new URL(`https://www.youtube.com/embed/${encodeURIComponent(videoId)}`)
     url.search = new URLSearchParams({
-      enablejsapi: '1', origin: location.origin, playsinline: '1', controls: '0', disablekb: '1', rel: '0',
+      enablejsapi: '1', origin: location.origin, playsinline: '1', rel: '0',
     }).toString()
     iframe.src = url.href
     iframe.title = 'Встроенный плеер YouTube'
@@ -189,31 +189,32 @@ export function mountVideo(video: HTMLVideoElement, type: 'mp4' | 'hls', url: st
   const nativeHls = type === 'hls' && Boolean(video.canPlayType('application/vnd.apple.mpegurl'))
   let disposed = false
   let ready = false
-  let priming = false
+  let muteBeforePriming: boolean | undefined
   let pending = false
   let hls: Hls | undefined
+
+  function finishPriming() {
+    if (muteBeforePriming === undefined) return
+    video.muted = muteBeforePriming
+    muteBeforePriming = undefined
+  }
+
+  function started() {
+    if (muteBeforePriming !== undefined) video.pause()
+    finishPriming()
+    events.started()
+  }
 
   function play() {
     if (pending || !video.paused) return
     pending = true
-    void video.play().then(() => {
+    void video.play().catch((error: unknown) => {
       if (disposed) return
-      pending = false
-      if (priming) {
-        priming = false
-        video.pause()
-        video.muted = false
-      }
-      events.started()
-    }, (error: unknown) => {
-      if (disposed) return
-      pending = false
-      priming = false
-      video.muted = false
+      finishPriming()
       const name = error instanceof DOMException ? error.name : ''
       if (name === 'NotAllowedError') events.blocked()
       else if (name !== 'AbortError') events.failed('Браузер не смог воспроизвести это видео.')
-    })
+    }).finally(() => { pending = false })
   }
 
   function metadata() {
@@ -227,11 +228,12 @@ export function mountVideo(video: HTMLVideoElement, type: 'mp4' | 'hls', url: st
       position: () => video.currentTime,
       duration: () => video.duration,
       sync({ position, playing, seek, gesture }) {
-        if (gesture || (playing && priming)) {
-          priming = gesture && !playing
-          video.muted = priming
+        if (playing) finishPriming()
+        else if (gesture && video.paused && muteBeforePriming === undefined) {
+          muteBeforePriming = video.muted
+          video.muted = true
         }
-        if (!playing && !priming && !video.paused) video.pause()
+        if (!playing && muteBeforePriming === undefined && !video.paused) video.pause()
         if (seek === 'immediate' || (seek === 'drift' && !video.seeking)) video.currentTime = position
         if (playing || gesture) play()
       },
@@ -245,6 +247,7 @@ export function mountVideo(video: HTMLVideoElement, type: 'mp4' | 'hls', url: st
     events.failed(message)
   }
   video.addEventListener('loadedmetadata', metadata)
+  video.addEventListener('playing', started)
   video.addEventListener('error', failed)
   if (type === 'mp4' || nativeHls) {
     video.src = url
@@ -275,7 +278,9 @@ export function mountVideo(video: HTMLVideoElement, type: 'mp4' | 'hls', url: st
   return () => {
     disposed = true
     video.removeEventListener('loadedmetadata', metadata)
+    video.removeEventListener('playing', started)
     video.removeEventListener('error', failed)
+    finishPriming()
     hls?.destroy()
     video.pause()
     video.removeAttribute('src')

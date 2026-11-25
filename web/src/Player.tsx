@@ -179,14 +179,14 @@ export function Player({ state, serverNow, host, connected, send }: Props) {
     note = 'Нажмите, чтобы разрешить воспроизведение со звуком.'
   } else if (mode === 'enabled') {
     note = !connected ? 'Синхронизация возобновится после подключения.'
-      : host ? 'Кнопки ниже управляют видео у всех участников.'
+      : host ? 'Управляйте воспроизведением для всех кнопками комнаты ниже.'
         : state.paused ? 'Пауза. Воспроизведением управляет ведущий.' : 'Воспроизведение синхронизировано с комнатой.'
   }
 
   return (
     <section className="player" aria-label="Видео комнаты">
       <div className="screen" aria-busy={mode === 'loading'}>
-        {type === 'youtube' ? <div className="youtube-frame" ref={youtube} /> : <video ref={video} playsInline preload="metadata" aria-label="Видео комнаты" />}
+        {type === 'youtube' ? <div className="youtube-frame" ref={youtube} /> : <video ref={video} controls playsInline preload="metadata" aria-label="Видео комнаты" />}
         {mode === 'loading' && <div className="screen-message" role="status"><div className="skeleton" />Загружаем плеер…</div>}
         {mode === 'failed' && <div className="screen-message error-message" role="alert">{failure}</div>}
       </div>
