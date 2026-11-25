@@ -1,0 +1,63 @@
+#!/bin/bash
+set -euo pipefail
+umask 077
+cd /opt/share-video
+
+repository=https://github.com/P4ll/share-video
+ref=$(git ls-remote --exit-code "$repository.git" refs/heads/main)
+revision=${ref%%$'\t'*}
+if [[ ! $revision =~ ^[0-9a-f]{40}$ ]]; then
+    echo 'GitHub did not return a full main revision' >&2
+    exit 1
+fi
+previous=
+if [[ -s state/revision ]]; then
+    previous=$(<state/revision)
+fi
+[[ $revision != "$previous" ]] || exit 0
+if [[ -s .failed-revision && $revision == "$(<.failed-revision)" ]]; then
+    exit 0
+fi
+
+archive=$(mktemp)
+trap 'rm -f "$archive"' EXIT
+status=$(curl --silent --show-error --location --proto '=https' --max-time 120 \
+    --output "$archive" --write-out '%{http_code}' \
+    "$repository/releases/download/deploy-$revision/share-video-image.tar.gz")
+case $status in
+    200) ;;
+    404) exit 0 ;; # CI has not published this commit yet.
+    *) printf 'GitHub release download returned HTTP %s\n' "$status" >&2; exit 1 ;;
+esac
+[[ $(git ls-remote --exit-code "$repository.git" refs/heads/main) == "$ref" ]] || exit 0
+
+image="share-video:$revision"
+docker image load --quiet --input "$archive"
+if [[ $(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$image") != "$revision" ]]; then
+    echo 'The image label does not match the requested revision' >&2
+    exit 1
+fi
+
+activate() {
+    APP_IMAGE="share-video:$1" docker compose up -d --no-build --pull never || return
+    curl --noproxy '*' --silent --show-error --fail --retry 8 --retry-all-errors --retry-delay 1 \
+        --max-time 3 --retry-max-time 20 http://127.0.0.1:8080/api/health >/dev/null
+}
+
+if activate "$revision"; then
+    printf '%s\n' "$revision" > state/revision.tmp
+    chmod 0644 state/revision.tmp
+    mv -f state/revision.tmp state/revision
+    printf 'Deployed %s\n' "$revision"
+else
+    printf '%s\n' "$revision" > .failed-revision
+    if [[ -n $previous ]]; then
+        [[ $previous =~ ^[0-9a-f]{40}$ ]] || exit 1
+        # Leave the last healthy revision published while restoring its image.
+        printf 'Deployment failed; restoring %s\n' "$previous" >&2
+        activate "$previous" || echo 'Could not restore the previous release' >&2
+    else
+        APP_IMAGE="$image" docker compose stop app || true
+    fi
+    exit 1
+fi

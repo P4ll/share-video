@@ -42,17 +42,19 @@ npm --prefix web test  # после npm ci в web/
 
 ### `watch.avgtree.online` — автоматическая выкладка
 
-Пуш в `main` запускает [Deploy Share Video](.github/workflows/deploy.yml). GitHub-hosted runner проверяет Rust и TypeScript, собирает `share-video:<полный SHA>` и передаёт образ по SSH. На VPS сборки нет. Старый запуск не выкладывается, если `main` уже указывает на другой коммит.
+Пуш в `main` запускает [Deploy Share Video](.github/workflows/deploy.yml). GitHub-hosted runner проверяет Rust и TypeScript, собирает `share-video:<полный SHA>` и публикует архив в публичном prerelease `deploy-<SHA>`. На VPS сборки и постоянных ключей GitHub нет. Право записи в `main` и публикации релизов даёт возможность развернуть контейнер.
 
-Пользователь `share-video-deploy` на VPS не входит в группу `docker`. Его SSH-ключ вызывает только `/usr/local/sbin/share-video-deploy` (исходник в [`deploy/receive-image`](deploy/receive-image)). Ключ хранится как Actions secret `SHARE_VIDEO_DEPLOY_KEY`; проверенный ключ SSH-хоста — как Actions variable `SHARE_VIDEO_KNOWN_HOSTS`. Права на запись в `main` дают возможность развернуть контейнер.
+`share-video-release.timer` на VPS проверяет текущий SHA `main` и скачивает только готовый образ этой ревизии. В `/opt/share-video` хранятся Compose-конфигурация и задеплоенный SHA. Caddy публикует его по `/_revision`; workflow сверяет SHA и `/api/health` перед завершением. Если контейнер не проходит локальную проверку здоровья, скрипт возвращает предыдущий образ.
 
-В `/opt/share-video` хранятся `compose.yaml`, `Caddyfile`, `.env` с доменом и [`compose.override.yaml`](deploy/compose.override.yaml) для проверки здоровья через loopback. Сервер сохраняет SHA после успешного запуска; если приложение не поднялось, использует предыдущий успешный образ. CI обновляет только образ приложения: изменения конфигурации прокси или скрипта нужно устанавливать на VPS отдельно. Старые образы остаются на диске, автоматической очистки нет.
+CI обновляет только образ приложения. Изменения файлов из [`deploy/`](deploy/) нужно устанавливать на VPS отдельно. Старые образы и релизы автоматически не удаляются. После отката таймер не перезапускает тот же сломанный коммит; после устранения причины администратор может удалить `.failed-revision` в `/opt/share-video` и повторить запуск.
 
 Проверка на VPS от администратора:
 
 ```sh
 cd /opt/share-video
-cat .deployed-revision
+cat state/revision
+systemctl status share-video-release.timer
+journalctl -u share-video-release.service -n 60
 docker compose ps
 docker compose logs --tail=100 app caddy
 ```

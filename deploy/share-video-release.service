@@ -1,0 +1,11 @@
+[Unit]
+Description=Deploy the published Share Video revision from main
+Wants=network-online.target
+Requires=docker.service
+After=network-online.target docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/share-video-sync-release
+TimeoutStartSec=180s
+PrivateTmp=true

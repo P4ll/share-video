@@ -1,0 +1,12 @@
+{$DOMAIN} {
+	handle /_revision {
+		root * /srv/share-video-state
+		rewrite * /revision
+		header Cache-Control "no-store"
+		file_server
+	}
+
+	handle {
+		reverse_proxy app:8080
+	}
+}

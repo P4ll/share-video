@@ -5,7 +5,7 @@ on:
     branches: [main]
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: share-video-production
@@ -32,32 +32,38 @@ jobs:
             --label "org.opencontainers.image.revision=$GITHUB_SHA" \
             --tag "share-video:$GITHUB_SHA" .
 
-      - name: Deploy and check HTTPS
+      - name: Publish image and confirm rollout
         env:
           GH_TOKEN: ${{ github.token }}
-          DEPLOY_KEY: ${{ secrets.SHARE_VIDEO_DEPLOY_KEY }}
-          DEPLOY_KNOWN_HOSTS: ${{ vars.SHARE_VIDEO_KNOWN_HOSTS }}
         run: |
-          latest=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha)
-          if [[ $GITHUB_SHA != "$latest" ]]; then
+          main_revision() {
+            gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" --jq .object.sha
+          }
+          if [[ $(main_revision) != "$GITHUB_SHA" ]]; then
             echo 'This revision is no longer the tip of main; skipping deployment.'
             exit 0
           fi
-          : "${DEPLOY_KEY:?Missing SHARE_VIDEO_DEPLOY_KEY}"
-          : "${DEPLOY_KNOWN_HOSTS:?Missing SHARE_VIDEO_KNOWN_HOSTS}"
-          umask 077
-          ssh_dir=$(mktemp -d)
-          trap 'rm -rf "$ssh_dir"' EXIT
-          printf '%s\n' "$DEPLOY_KEY" > "$ssh_dir/key"
-          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > "$ssh_dir/known_hosts"
 
-          {
-            printf '%s\n' "$GITHUB_SHA"
-            docker image save "share-video:$GITHUB_SHA" | gzip -1
-          } | ssh -T -o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes \
-            -o "UserKnownHostsFile=$ssh_dir/known_hosts" -o ConnectTimeout=15 \
-            -i "$ssh_dir/key" share-video-deploy@watch.avgtree.online
+          tag="deploy-$GITHUB_SHA"
+          if ! gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            archive="$RUNNER_TEMP/share-video-image.tar.gz"
+            docker image save "share-video:$GITHUB_SHA" | gzip -1 > "$archive"
+            gh release create "$tag" "$archive" --repo "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" --prerelease --latest=false \
+              --title "Deploy ${GITHUB_SHA:0:12}" --notes "Production image for $GITHUB_SHA."
+          fi
 
-          curl --silent --show-error --fail --retry 20 --retry-all-errors --retry-delay 3 \
-            --max-time 6 --retry-max-time 90 https://watch.avgtree.online/api/health
-          printf '\nDeployed `%s` to <https://watch.avgtree.online>.\n' "$GITHUB_SHA" >> "$GITHUB_STEP_SUMMARY"
+          for attempt in {1..30}; do
+            if [[ $(curl -fsS --max-time 5 https://watch.avgtree.online/_revision 2>/dev/null || true) == "$GITHUB_SHA" ]]; then
+              curl -fsS --max-time 5 https://watch.avgtree.online/api/health
+              printf '\nDeployed `%s` to <https://watch.avgtree.online>.\n' "$GITHUB_SHA" >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
+            if [[ $(main_revision) != "$GITHUB_SHA" ]]; then
+              echo 'A newer revision is ready to deploy.'
+              exit 0
+            fi
+            sleep 5
+          done
+          echo 'The VPS did not report the expected revision.' >&2
+          exit 1
