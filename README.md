@@ -40,6 +40,25 @@ npm --prefix web test  # после npm ci в web/
 
 ## Публичное развёртывание
 
+### `watch.avgtree.online` — автоматическая выкладка
+
+Пуш в `main` запускает [Deploy Share Video](.github/workflows/deploy.yml). GitHub-hosted runner проверяет Rust и TypeScript, собирает `share-video:<полный SHA>` и передаёт образ по SSH. На VPS сборки нет. Старый запуск не выкладывается, если `main` уже указывает на другой коммит.
+
+Пользователь `share-video-deploy` на VPS не входит в группу `docker`. Его SSH-ключ вызывает только `/usr/local/sbin/share-video-deploy` (исходник в [`deploy/receive-image`](deploy/receive-image)). Ключ хранится как Actions secret `SHARE_VIDEO_DEPLOY_KEY`; проверенный ключ SSH-хоста — как Actions variable `SHARE_VIDEO_KNOWN_HOSTS`. Права на запись в `main` дают возможность развернуть контейнер.
+
+В `/opt/share-video` хранятся `compose.yaml`, `Caddyfile`, `.env` с доменом и [`compose.override.yaml`](deploy/compose.override.yaml) для проверки здоровья через loopback. Сервер сохраняет SHA после успешного запуска; если приложение не поднялось, использует предыдущий успешный образ. CI обновляет только образ приложения: изменения конфигурации прокси или скрипта нужно устанавливать на VPS отдельно. Старые образы остаются на диске, автоматической очистки нет.
+
+Проверка на VPS от администратора:
+
+```sh
+cd /opt/share-video
+cat .deployed-revision
+docker compose ps
+docker compose logs --tail=100 app caddy
+```
+
+### Другой сервер — ручная установка
+
 На сервере нужны Docker с Compose V2 и доменное имя. Направьте запись DNS `A` на публичный IPv4 сервера; добавляйте `AAAA` только при рабочем публичном IPv6. Откройте входящие TCP-порты 80 и 443 в настройках провайдера и файрволе. Если сервер за NAT, пробросьте оба порта на него.
 
 В корне репозитория создайте или обновите файл `.env`, указав своё имя хоста (без `https://`, порта и пути):

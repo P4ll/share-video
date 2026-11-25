@@ -1,0 +1,41 @@
+#!/bin/bash
+set -euo pipefail
+umask 077
+cd /opt/share-video
+
+# The forced SSH command accepts one revision line followed by a gzip-compressed Docker archive.
+IFS= read -r -n 41 revision
+if [[ ! $revision =~ ^[0-9a-f]{40}$ ]]; then
+    echo 'Expected a full Git revision' >&2
+    exit 1
+fi
+exec 9>/run/lock/share-video-deploy.lock
+flock -x 9
+
+image="share-video:$revision"
+docker image load --quiet
+if [[ $(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$image") != "$revision" ]]; then
+    echo 'The image label does not match the requested revision' >&2
+    exit 1
+fi
+
+activate() {
+    APP_IMAGE="share-video:$1" docker compose up -d --no-build --pull never || return
+    curl --noproxy '*' --silent --show-error --fail --retry 8 --retry-all-errors --retry-delay 1 \
+        --max-time 3 --retry-max-time 20 http://127.0.0.1:8080/api/health >/dev/null
+}
+
+if activate "$revision"; then
+    printf '%s\n' "$revision" > .deployed-revision.tmp
+    mv -f .deployed-revision.tmp .deployed-revision
+    printf 'Deployed %s\n' "$revision"
+else
+    if [[ -s .deployed-revision ]]; then
+        previous=$(<.deployed-revision)
+        printf 'Deployment failed; restoring %s\n' "$previous" >&2
+        activate "$previous" || echo 'Could not restore the previous release' >&2
+    else
+        APP_IMAGE="$image" docker compose stop app || true
+    fi
+    exit 1
+fi

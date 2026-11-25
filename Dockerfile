@@ -5,10 +5,16 @@ RUN npm ci
 COPY web/ ./
 RUN npm run build
 
+FROM web-build AS web-test
+RUN npm test
+
 FROM rust:1.93-bookworm AS server-build
 WORKDIR /build
 COPY server/ ./server/
 RUN cargo build --locked --release --manifest-path server/Cargo.toml
+
+FROM server-build AS server-test
+RUN cargo test --locked --release --manifest-path server/Cargo.toml
 
 FROM debian:bookworm-slim
 WORKDIR /app
