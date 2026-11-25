@@ -24,15 +24,12 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Test and build production image
+      - name: Test web and server
         run: |
           docker build --target web-test .
           docker build --target server-test .
-          docker build \
-            --label "org.opencontainers.image.revision=$GITHUB_SHA" \
-            --tag "share-video:$GITHUB_SHA" .
 
-      - name: Publish image and confirm rollout
+      - name: Mark tested revision and confirm rollout
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -44,23 +41,20 @@ jobs:
             exit 0
           fi
 
-          tag="deploy-$GITHUB_SHA"
-          if ! gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            archive="$RUNNER_TEMP/share-video-image.tar.gz"
-            docker image save "share-video:$GITHUB_SHA" | gzip -1 > "$archive"
-            gh release create "$tag" "$archive" --repo "$GITHUB_REPOSITORY" \
-              --target "$GITHUB_SHA" --prerelease --latest=false \
-              --title "Deploy ${GITHUB_SHA:0:12}" --notes "Production image for $GITHUB_SHA."
-          fi
+          # Only this job advances the deployment ref, after both test targets pass.
+          auth=$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)
+          echo "::add-mask::$auth"
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" \
+            push origin "$GITHUB_SHA:refs/heads/deploy/production"
 
-          for attempt in {1..30}; do
+          for attempt in {1..75}; do
             if [[ $(curl -fsS --max-time 5 https://watch.avgtree.online/_revision 2>/dev/null || true) == "$GITHUB_SHA" ]]; then
               curl -fsS --max-time 5 https://watch.avgtree.online/api/health
               printf '\nDeployed `%s` to <https://watch.avgtree.online>.\n' "$GITHUB_SHA" >> "$GITHUB_STEP_SUMMARY"
               exit 0
             fi
             if [[ $(main_revision) != "$GITHUB_SHA" ]]; then
-              echo 'A newer revision is ready to deploy.'
+              echo 'A newer revision is now at the tip of main.'
               exit 0
             fi
             sleep 5
