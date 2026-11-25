@@ -1,0 +1,4 @@
+{$DOMAIN} {
+	# Over plain HTTP, Caddy preserves the original Host for WebSocket Origin checks.
+	reverse_proxy app:8080
+}

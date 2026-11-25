@@ -1,0 +1,10 @@
+**
+!web/
+!web/**
+!server/
+!server/**
+web/node_modules/
+web/dist/
+server/target/
+**/.env
+**/.env.*

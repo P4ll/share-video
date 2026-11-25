@@ -1,0 +1,90 @@
+@import 'tailwindcss';
+
+@theme {
+  --color-paper: #f5f4ef;
+  --color-surface: #fcfbf8;
+  --color-ink: #252822;
+  --color-muted: #555c52;
+  --color-line: #d5d8ce;
+  --color-accent: #2e5545;
+  --color-accent-deep: #213f33;
+}
+
+@layer base {
+  body {
+    @apply min-h-dvh bg-paper text-ink antialiased;
+    font-family: Geist, 'Segoe UI', system-ui, sans-serif;
+  }
+  h1 { @apply text-3xl font-semibold tracking-tight leading-tight; }
+  h2 { @apply text-base font-semibold tracking-tight; }
+  input {
+    @apply min-w-0 w-full min-h-11 rounded-lg border border-line bg-surface px-3 text-base text-ink outline-none;
+  }
+  input::placeholder { @apply text-muted; }
+  :focus-visible { outline: 2px solid var(--color-accent); outline-offset: 3px; }
+}
+
+@layer components {
+  .shell { @apply mx-auto max-w-5xl px-4 pb-12; }
+  .site-header { @apply flex min-h-16 items-center border-b border-line; }
+  .brand { @apply inline-flex min-h-11 items-center gap-2.5 font-semibold tracking-tight; }
+  .brand-mark { @apply grid size-8 place-items-center rounded-lg bg-accent text-white; }
+  .brand-mark svg { @apply size-5; }
+
+  .create-layout { @apply grid max-w-2xl gap-7 py-10; }
+  .create-layout h1 { @apply text-4xl; }
+  .subtitle { @apply mt-3 max-w-[58ch] leading-relaxed text-muted; }
+  .create-form, .source-form { @apply grid gap-2; }
+  .create-form > label, .source-form > label { @apply text-sm font-semibold; }
+  .field-row { @apply grid gap-2; }
+  .help { @apply text-sm leading-relaxed text-muted; }
+
+  .button {
+    @apply inline-flex min-h-11 items-center justify-center gap-2 rounded-lg border border-line bg-surface px-3.5 py-2 text-sm font-semibold text-ink motion-safe:transition-colors;
+  }
+  .button:not(:disabled):hover { @apply border-muted; }
+  .button:not(:disabled):active { @apply motion-safe:scale-[0.98]; }
+  .button.primary { @apply border-accent bg-accent text-white; }
+  .button.primary:not(:disabled):hover { @apply border-accent-deep bg-accent-deep; }
+  .button:disabled, input:disabled { @apply opacity-55; }
+  .button:not(:disabled) { @apply cursor-pointer; }
+
+  .room-layout { @apply mx-auto grid max-w-4xl justify-items-stretch gap-5 pt-6; }
+  .room-layout > a.button { @apply justify-self-start; }
+  .room-heading { @apply relative; }
+  .pill { @apply rounded border border-line px-2 py-0.5 text-xs font-semibold text-muted; }
+  .connection { @apply inline-flex items-center gap-1.5 text-sm text-muted; }
+  .connection i { @apply size-1.5 rounded-full bg-muted; }
+  .connection[data-connected='true'] { @apply text-accent; }
+  .connection[data-connected='true'] i { @apply bg-accent; }
+  .source-label { @apply mt-1 text-sm text-muted; }
+  .room-unavailable { @apply grid justify-items-start gap-4; }
+
+  .screen {
+    @apply relative grid aspect-video min-h-[200px] w-full place-items-center overflow-hidden rounded-xl bg-[#232622] text-[#f2f1ed];
+  }
+  .screen video, .youtube-frame, .youtube-frame iframe { @apply absolute inset-0 size-full; }
+  .screen video { @apply object-contain; }
+  .screen-message { @apply pointer-events-none z-1 grid justify-items-center gap-3 px-5 text-center text-sm; }
+  .error-message { @apply max-w-md text-base; }
+  .skeleton { @apply h-2 w-24 rounded-full bg-[#4f574e] motion-safe:animate-pulse; }
+  .player-note { @apply mt-3 flex flex-wrap items-center gap-x-3 gap-y-2 text-sm leading-relaxed text-muted; }
+
+  .room-controls { @apply mt-5 grid gap-3 border-y border-line py-4; }
+  .control-row { @apply grid items-center gap-2; }
+  .room-clock { @apply text-sm tabular-nums text-muted; }
+  .seek-form { @apply grid grid-cols-[minmax(0,1fr)_auto] items-center gap-2; }
+  .form-error { @apply border-l-2 border-[#88584d] pl-3 text-sm leading-relaxed text-[#633830]; }
+  .invite { @apply grid gap-1 border-t border-line pt-4; }
+
+  @media (min-width: 640px) {
+    .shell { @apply px-6; }
+    .site-header { @apply min-h-18; }
+    .create-layout { @apply py-16; }
+    .create-layout h1 { @apply text-5xl; }
+    .field-row { @apply grid-cols-[minmax(0,1fr)_auto]; }
+    .control-row { @apply grid-cols-[auto_minmax(0,1fr)] justify-items-start gap-4; }
+    .seek-form { @apply grid-cols-[8.5rem_auto]; }
+    .room-layout { @apply pt-8; }
+  }
+}
