@@ -15,6 +15,7 @@ export type MediaPlayer = {
 type MediaEvents = {
   ready: (player: MediaPlayer) => void
   started: () => void
+  playbackChanged: (paused: boolean) => void
   blocked: () => void
   failed: (message: string) => void
 }
@@ -81,6 +82,7 @@ export function mountYouTube(container: HTMLElement, videoId: string, events: Me
   let player: YouTubePlayer | undefined
   let playTimer = 0
   let priming = false
+  let reportedPlaying = false
   const iframe = document.createElement('iframe')
 
   function resetPlayTimer() {
@@ -128,6 +130,7 @@ export function mountYouTube(container: HTMLElement, videoId: string, events: Me
               }
               const state = target.getPlayerState()
               if (!playing && !priming && (state === 1 || state === 3 || playTimer)) {
+                reportedPlaying = false
                 target.pauseVideo()
                 resetPlayTimer()
               }
@@ -152,12 +155,22 @@ export function mountYouTube(container: HTMLElement, videoId: string, events: Me
           })
         },
         onStateChange: ({ target, data }) => {
-          if (disposed || data !== 1) return
+          if (disposed) return
+          if (data === 0) reportedPlaying = false
+          if (data === 2 && reportedPlaying) {
+            reportedPlaying = false
+            events.playbackChanged(true)
+          }
+          if (data !== 1) return
           resetPlayTimer()
           if (priming) {
             priming = false
+            reportedPlaying = false
             target.pauseVideo()
             target.unMute()
+          } else if (!reportedPlaying) {
+            reportedPlaying = true
+            events.playbackChanged(false)
           }
           events.started()
         },
@@ -190,6 +203,7 @@ export function mountVideo(video: HTMLVideoElement, type: 'mp4' | 'hls', url: st
   let disposed = false
   let ready = false
   let muteBeforePriming: boolean | undefined
+  let reportedPlaying = false
   let pending = false
   let hls: Hls | undefined
 
@@ -203,6 +217,18 @@ export function mountVideo(video: HTMLVideoElement, type: 'mp4' | 'hls', url: st
     if (muteBeforePriming !== undefined) video.pause()
     finishPriming()
     events.started()
+  }
+
+  function played() {
+    if (muteBeforePriming !== undefined || video.paused || reportedPlaying) return
+    reportedPlaying = true
+    events.playbackChanged(false)
+  }
+
+  function paused() {
+    if (!reportedPlaying) return
+    reportedPlaying = false
+    if (!video.ended) events.playbackChanged(true)
   }
 
   function play() {
@@ -233,7 +259,10 @@ export function mountVideo(video: HTMLVideoElement, type: 'mp4' | 'hls', url: st
           muteBeforePriming = video.muted
           video.muted = true
         }
-        if (!playing && muteBeforePriming === undefined && !video.paused) video.pause()
+        if (!playing && muteBeforePriming === undefined && !video.paused) {
+          reportedPlaying = false
+          video.pause()
+        }
         if (seek === 'immediate' || (seek === 'drift' && !video.seeking)) video.currentTime = position
         if (playing || gesture) play()
       },
@@ -247,6 +276,8 @@ export function mountVideo(video: HTMLVideoElement, type: 'mp4' | 'hls', url: st
     events.failed(message)
   }
   video.addEventListener('loadedmetadata', metadata)
+  video.addEventListener('play', played)
+  video.addEventListener('pause', paused)
   video.addEventListener('playing', started)
   video.addEventListener('error', failed)
   if (type === 'mp4' || nativeHls) {
@@ -278,6 +309,8 @@ export function mountVideo(video: HTMLVideoElement, type: 'mp4' | 'hls', url: st
   return () => {
     disposed = true
     video.removeEventListener('loadedmetadata', metadata)
+    video.removeEventListener('play', played)
+    video.removeEventListener('pause', paused)
     video.removeEventListener('playing', started)
     video.removeEventListener('error', failed)
     finishPriming()

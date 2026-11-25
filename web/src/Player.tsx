@@ -73,6 +73,8 @@ export function Player({ state, serverNow, host, connected, send }: Props) {
   const youtube = useRef<HTMLDivElement>(null)
   const player = useRef<MediaPlayer | null>(null)
   const snapshot = useRef(state)
+  const controls = useRef({ host, connected, send })
+  const pendingPlayback = useRef<{ paused: boolean; revision: number; expiresAt: number } | null>(null)
   const modeRef = useRef<Mode>('loading')
   const [mode, setMode] = useState<Mode>('loading')
   const [failure, setFailure] = useState('')
@@ -83,6 +85,13 @@ export function Player({ state, serverNow, host, connected, send }: Props) {
     const media = player.current
     if (!media || modeRef.current !== 'enabled') return
     const next = snapshot.current
+    const pending = pendingPlayback.current
+    if (pending) {
+      // Don't correct a local click back to the old room state before the server echoes it.
+      if (controls.current.connected && performance.now() < pending.expiresAt &&
+          (next.revision <= pending.revision || next.paused !== pending.paused)) return
+      pendingPlayback.current = null
+    }
     const length = media.duration()
     const limit = Number.isFinite(length) && length > 0 ? length : Infinity
     const target = positionAt(next, serverNow())
@@ -94,6 +103,11 @@ export function Player({ state, serverNow, host, connected, send }: Props) {
       gesture,
     })
   }, [serverNow])
+
+  useLayoutEffect(() => {
+    controls.current = { host, connected, send }
+    if (!connected || !host) pendingPlayback.current = null
+  }, [host, connected, send])
 
   useLayoutEffect(() => {
     snapshot.current = state
@@ -132,6 +146,15 @@ export function Player({ state, serverNow, host, connected, send }: Props) {
         updateDuration()
         updateMode('enabled')
         sync(immediate)
+      },
+      playbackChanged(paused: boolean) {
+        const { host, connected, send } = controls.current
+        if (!host || !connected || !player.current) return
+        const current = snapshot.current
+        if (paused === (pendingPlayback.current?.paused ?? current.paused)) return
+        if (send({ type: paused ? 'pause' : 'play' })) {
+          pendingPlayback.current = { paused, revision: current.revision, expiresAt: performance.now() + 5000 }
+        }
       },
       blocked() {
         updateMode('blocked')
@@ -176,10 +199,11 @@ export function Player({ state, serverNow, host, connected, send }: Props) {
       ? 'Браузер заблокировал запуск. Нажмите «Смотреть» или кнопку воспроизведения в самом плеере YouTube.'
       : 'Браузер заблокировал звук. Нажмите «Смотреть» ещё раз.'
   } else if (mode === 'ready') {
-    note = 'Нажмите, чтобы разрешить воспроизведение со звуком.'
+    note = host ? 'Воспроизведение и пауза в плеере действуют на всю комнату.'
+      : 'Нажмите, чтобы разрешить воспроизведение со звуком.'
   } else if (mode === 'enabled') {
     note = !connected ? 'Синхронизация возобновится после подключения.'
-      : host ? 'Управляйте воспроизведением для всех кнопками комнаты ниже.'
+      : host ? 'Воспроизведение и пауза в плеере действуют на всю комнату. Для общей перемотки используйте кнопки ниже.'
         : state.paused ? 'Пауза. Воспроизведением управляет ведущий.' : 'Воспроизведение синхронизировано с комнатой.'
   }
 
