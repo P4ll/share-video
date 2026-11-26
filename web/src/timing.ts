@@ -7,3 +7,8 @@ export function positionAt(state: RoomState, serverNowMs: number): number {
 export function needsSeek(actual: number, target: number, immediate: boolean): boolean {
   return Number.isFinite(actual) && Math.abs(actual - target) > (immediate ? 0.15 : 2)
 }
+
+export function playbackJumped(previous: number, current: number, elapsedSec: number, rate: number): boolean {
+  const delta = current - previous
+  return delta < -0.75 || delta > elapsedSec * rate + 0.75
+}

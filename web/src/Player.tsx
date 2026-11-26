@@ -74,7 +74,11 @@ export function Player({ state, serverNow, canControl, connected, send }: Props)
   const player = useRef<MediaPlayer | null>(null)
   const snapshot = useRef(state)
   const controls = useRef({ canControl, connected, send })
-  const pendingPlayback = useRef<{ paused: boolean; revision: number; expiresAt: number } | null>(null)
+  const pending = useRef<{
+    revision: number
+    expiresAt: number
+    change: { paused: boolean } | { positionSec: number }
+  } | null>(null)
   const modeRef = useRef<Mode>('loading')
   const [mode, setMode] = useState<Mode>('loading')
   const [failure, setFailure] = useState('')
@@ -85,12 +89,13 @@ export function Player({ state, serverNow, canControl, connected, send }: Props)
     const media = player.current
     if (!media || modeRef.current !== 'enabled') return
     const next = snapshot.current
-    const pending = pendingPlayback.current
-    if (pending) {
-      // Don't correct a local click back to the old room state before the server echoes it.
-      if (controls.current.connected && performance.now() < pending.expiresAt &&
-          (next.revision <= pending.revision || next.paused !== pending.paused)) return
-      pendingPlayback.current = null
+    const local = pending.current
+    if (local) {
+      const applied = next.revision > local.revision && ('paused' in local.change
+        ? next.paused === local.change.paused : next.positionSec === local.change.positionSec)
+      // Don't correct a local action back to the old room state before the server echoes it.
+      if (controls.current.connected && performance.now() < local.expiresAt && !applied) return
+      pending.current = null
     }
     const length = media.duration()
     const limit = Number.isFinite(length) && length > 0 ? length : Infinity
@@ -106,11 +111,11 @@ export function Player({ state, serverNow, canControl, connected, send }: Props)
 
   useLayoutEffect(() => {
     const revoked = controls.current.canControl && !canControl
-    const disconnectedWithPending = !connected && pendingPlayback.current !== null
+    const disconnectedWithPending = !connected && pending.current !== null
     const stateChanged = snapshot.current !== state
     controls.current = { canControl, connected, send }
     snapshot.current = state
-    if (!connected || !canControl) pendingPlayback.current = null
+    if (!connected || !canControl) pending.current = null
     if (stateChanged || revoked || disconnectedWithPending) sync(true)
   }, [state, canControl, connected, send, sync])
 
@@ -147,13 +152,22 @@ export function Player({ state, serverNow, canControl, connected, send }: Props)
         updateMode('enabled')
         sync(immediate)
       },
+      canSeek: () => controls.current.canControl && controls.current.connected,
+      seeked(positionSec: number) {
+        const { canControl, connected, send } = controls.current
+        if (!canControl || !connected || !Number.isFinite(positionSec) || positionSec < 0) return false
+        if (!send({ type: 'seek', positionSec })) return false
+        pending.current = { change: { positionSec }, revision: snapshot.current.revision, expiresAt: performance.now() + 5000 }
+        return true
+      },
       playbackChanged(paused: boolean) {
         const { canControl, connected, send } = controls.current
         if (!canControl || !connected || !player.current) return
         const current = snapshot.current
-        if (paused === (pendingPlayback.current?.paused ?? current.paused)) return
+        const change = pending.current?.change
+        if (paused === (change && 'paused' in change ? change.paused : current.paused)) return
         if (send({ type: paused ? 'pause' : 'play' })) {
-          pendingPlayback.current = { paused, revision: current.revision, expiresAt: performance.now() + 5000 }
+          pending.current = { change: { paused }, revision: current.revision, expiresAt: performance.now() + 5000 }
         }
       },
       blocked() {
@@ -203,7 +217,7 @@ export function Player({ state, serverNow, canControl, connected, send }: Props)
       : 'Нажмите, чтобы разрешить воспроизведение со звуком.'
   } else if (mode === 'enabled') {
     note = !connected ? 'Синхронизация возобновится после подключения.'
-      : canControl ? 'Воспроизведение и пауза в плеере действуют на всю комнату. Для общей перемотки используйте кнопки ниже.'
+      : canControl ? 'Воспроизведение, пауза и перемотка в плеере действуют на всю комнату.'
         : state.paused ? 'Воспроизведение в комнате на паузе.' : 'Воспроизведение синхронизировано с комнатой.'
   }
 

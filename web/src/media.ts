@@ -1,4 +1,5 @@
 import type Hls from 'hls.js'
+import { playbackJumped } from './timing'
 
 type PlaybackTarget = {
   position: number
@@ -16,6 +17,8 @@ type MediaEvents = {
   ready: (player: MediaPlayer) => void
   started: () => void
   playbackChanged: (paused: boolean) => void
+  canSeek: () => boolean
+  seeked: (positionSec: number) => boolean
   blocked: () => void
   failed: (message: string) => void
 }
@@ -24,6 +27,7 @@ type YouTubePlayer = {
   getCurrentTime: () => number
   getDuration: () => number
   getPlayerState: () => number
+  getPlaybackRate: () => number
   seekTo: (seconds: number, allowSeekAhead: boolean) => void
   playVideo: () => void
   pauseVideo: () => void
@@ -83,7 +87,31 @@ export function mountYouTube(container: HTMLElement, videoId: string, events: Me
   let playTimer = 0
   let priming = false
   let reportedPlaying = false
+  let seekTimer = 0
+  let sample: { position: number; at: number; rate: number } | undefined
+  let roomSeek: { position: number; until: number } | undefined
   const iframe = document.createElement('iframe')
+
+  // shortcut: IFrame API has no seek event; jumps under 0.75 s are ambiguous, use the room field for exact seeks.
+  function observeSeek(target: YouTubePlayer): boolean {
+    const state = target.getPlayerState()
+    if (!events.canSeek() || priming || (state !== 1 && state !== 2 && state !== 3)) {
+      sample = undefined
+      return false
+    }
+    const position = target.getCurrentTime()
+    if (!Number.isFinite(position)) return false
+    const at = performance.now()
+    const rate = target.getPlaybackRate() || 1
+    const previous = sample
+    sample = { position, at, rate }
+    if (roomSeek) {
+      if (Math.abs(position - roomSeek.position) < 0.75 || at >= roomSeek.until) roomSeek = undefined
+      return false
+    }
+    return !!previous && playbackJumped(previous.position, position, (at - previous.at) / 1000, Math.max(previous.rate, rate))
+      && events.seeked(position)
+  }
 
   function resetPlayTimer() {
     window.clearTimeout(playTimer)
@@ -116,10 +144,12 @@ export function mountYouTube(container: HTMLElement, videoId: string, events: Me
       events: {
         onReady: ({ target }) => {
           if (disposed) return
+          seekTimer = window.setInterval(() => observeSeek(target), 250)
           events.ready({
             position: () => target.getCurrentTime(),
             duration: () => target.getDuration(),
             sync({ position, playing, seek, gesture }) {
+              if (seek === 'drift' && observeSeek(target)) return
               if (gesture) {
                 priming = !playing
                 if (priming) target.mute()
@@ -140,6 +170,7 @@ export function mountYouTube(container: HTMLElement, videoId: string, events: Me
                   priming = true
                   target.mute()
                 }
+                roomSeek = { position, until: performance.now() + 5000 }
                 target.seekTo(position, true)
               }
               if ((playing || gesture) && state !== 1 && (gesture || (state !== 3 && !playTimer))) {
@@ -193,6 +224,7 @@ export function mountYouTube(container: HTMLElement, videoId: string, events: Me
   return () => {
     disposed = true
     resetPlayTimer()
+    window.clearInterval(seekTimer)
     player?.destroy()
     iframe.remove()
   }
@@ -206,6 +238,14 @@ export function mountVideo(video: HTMLVideoElement, type: 'mp4' | 'hls', url: st
   let reportedPlaying = false
   let pending = false
   let hls: Hls | undefined
+  let roomSeek: number | undefined
+
+  function seeked() {
+    const position = video.currentTime
+    const expected = roomSeek
+    roomSeek = undefined
+    if (expected === undefined || Math.abs(position - expected) > 0.15) events.seeked(position)
+  }
 
   function finishPriming() {
     if (muteBeforePriming === undefined) return
@@ -263,7 +303,10 @@ export function mountVideo(video: HTMLVideoElement, type: 'mp4' | 'hls', url: st
           reportedPlaying = false
           video.pause()
         }
-        if (seek === 'immediate' || (seek === 'drift' && !video.seeking)) video.currentTime = position
+        if (seek !== 'none' && (!video.seeking || (seek === 'immediate' && !events.canSeek()))) {
+          video.currentTime = position
+          roomSeek = video.currentTime
+        }
         if (playing || gesture) play()
       },
     })
@@ -279,6 +322,7 @@ export function mountVideo(video: HTMLVideoElement, type: 'mp4' | 'hls', url: st
   video.addEventListener('play', played)
   video.addEventListener('pause', paused)
   video.addEventListener('playing', started)
+  video.addEventListener('seeked', seeked)
   video.addEventListener('error', failed)
   if (type === 'mp4' || nativeHls) {
     video.src = url
@@ -312,6 +356,7 @@ export function mountVideo(video: HTMLVideoElement, type: 'mp4' | 'hls', url: st
     video.removeEventListener('play', played)
     video.removeEventListener('pause', paused)
     video.removeEventListener('playing', started)
+    video.removeEventListener('seeked', seeked)
     video.removeEventListener('error', failed)
     finishPriming()
     hls?.destroy()
