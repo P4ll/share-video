@@ -7,7 +7,7 @@ use axum::{
     Json, Router,
     extract::{DefaultBodyLimit, Path, State, WebSocketUpgrade, rejection::JsonRejection, ws::{Message, Utf8Bytes, WebSocket}},
     http::{HeaderMap, HeaderValue, StatusCode, Uri, header},
-    response::{IntoResponse, Response},
+    response::{IntoResponse, Redirect, Response},
     routing::{get, get_service, post},
 };
 use serde::Deserialize;
@@ -55,6 +55,7 @@ async fn main() -> std::io::Result<()> {
         .route("/api/rooms", post(create_room).layer(DefaultBodyLimit::max(MAX_MESSAGE_BYTES)))
         .route("/api/rooms/{room_id}/ws", get(upgrade))
         .route("/r/{room_id}", get_service(ServeFile::new(static_dir.join("index.html"))))
+        .route("/i/{token}", get(open_invitation))
         .fallback_service(ServeDir::new(static_dir))
         // Keep the room capability out of referrers without breaking YouTube embeds.
         .layer(SetResponseHeaderLayer::overriding(header::REFERRER_POLICY, HeaderValue::from_static("strict-origin")))
@@ -87,6 +88,14 @@ async fn create_room(State(app): State<App>, body: Result<Json<CreateRoom>, Json
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(WireError::new("internal_error", "Не удалось создать комнату.")),
         ).into_response(),
+    }
+}
+
+async fn open_invitation(State(app): State<App>, Path(token): Path<String>) -> Response {
+    let cache = [(header::CACHE_CONTROL, "no-store")];
+    match app.rooms.invite_room(&token) {
+        Some(room_id) => (cache, Redirect::temporary(&format!("/r/{room_id}?invite={token}"))).into_response(),
+        None => (StatusCode::NOT_FOUND, cache, "Приглашение недействительно или комната закрыта.").into_response(),
     }
 }
 

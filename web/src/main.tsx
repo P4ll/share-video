@@ -52,16 +52,13 @@ function CreateRoom() {
   )
 }
 
-function Invite({ roomId, invitation, connected, setControl }: {
-  roomId: string
+function Invite({ invitation, connected, setControl }: {
   invitation: Invitation
   connected: boolean
   setControl: (canControl: boolean) => void
 }) {
   const { number, token, canControl } = invitation
-  const url = new URL(`/r/${encodeURIComponent(roomId)}`, location.origin)
-  url.searchParams.set('invite', token)
-  const link = url.href
+  const link = new URL(`/i/${token}`, location.origin).href
   const nameId = `guest-${number}`
   const [result, setResult] = useState<'copied' | 'manual'>()
   const input = useRef<HTMLInputElement>(null)
@@ -157,7 +154,7 @@ function Room({ roomId, inviteToken }: { roomId: string; inviteToken: string | n
               </div>
               {invitations?.length ? (
                 <ul className="divide-y divide-line" role="list">
-                  {invitations.map((invitation) => <Invite key={invitation.number} {...{ roomId, invitation, connected }}
+                  {invitations.map((invitation) => <Invite key={invitation.number} {...{ invitation, connected }}
                     setControl={(canControl) => send({ type: 'set_guest_control', guestNumber: invitation.number, canControl })} />)}
                 </ul>
               ) : <p className="help">Создайте отдельную ссылку для каждого гостя.</p>}

@@ -5,6 +5,7 @@ use std::{
 };
 
 use axum::extract::ws::Utf8Bytes;
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Deserializer, Serialize};
 use subtle::ConstantTimeEq;
 use tokio::{sync::broadcast, time::Instant};
@@ -201,20 +202,21 @@ impl Room {
         self.participants > 0 || now_ms - self.last_empty_ms < ROOM_TTL_MS
     }
 
-    fn create_invitation(&mut self, room_id: &str) -> Result<(), WireError> {
+    fn create_invitation(&mut self, room_id: &str, invite_rooms: &mut HashMap<String, String>) -> Result<(), WireError> {
         if self.invitations.len() >= MAX_INVITATIONS {
             return Err(WireError::INVITATION_CAPACITY);
         }
-        let token = loop {
+        loop {
             let mut bytes = [0; 16];
             getrandom::fill(&mut bytes)
                 .map_err(|_| WireError::new("internal_error", "Не удалось создать приглашение."))?;
-            let token = format!("{:032x}", u128::from_be_bytes(bytes));
-            if token != room_id && token != self.host_token && self.invitations.iter().all(|item| item.token != token) {
-                break token;
+            let token = URL_SAFE_NO_PAD.encode(bytes);
+            if let Entry::Vacant(entry) = invite_rooms.entry(token.clone()) {
+                entry.insert(room_id.to_owned());
+                self.invitations.push(Invitation { number: self.invitations.len() + 1, token, can_control: false });
+                break;
             }
-        };
-        self.invitations.push(Invitation { number: self.invitations.len() + 1, token, can_control: false });
+        }
         Ok(())
     }
 
@@ -235,8 +237,28 @@ pub enum CreateFailure {
     Entropy,
 }
 
+#[derive(Default)]
+struct Registry {
+    rooms: HashMap<String, Room>,
+    invite_rooms: HashMap<String, String>,
+}
+
+impl Registry {
+    fn prune(&mut self, now_ms: u64) {
+        self.rooms.retain(|_, room| {
+            if room.is_available(now_ms) {
+                return true;
+            }
+            for invitation in &room.invitations {
+                self.invite_rooms.remove(&invitation.token);
+            }
+            false
+        });
+    }
+}
+
 pub struct Rooms {
-    entries: Mutex<HashMap<String, Room>>,
+    entries: Mutex<Registry>,
     started: Instant,
     epoch_ms: u64,
 }
@@ -244,7 +266,7 @@ pub struct Rooms {
 impl Rooms {
     pub fn new() -> Self {
         Self {
-            entries: Mutex::new(HashMap::new()),
+            entries: Mutex::new(Registry::default()),
             started: Instant::now(),
             epoch_ms: SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as u64,
         }
@@ -256,9 +278,17 @@ impl Rooms {
     }
 
     pub fn prune(&self) {
-        let mut entries = self.entries.lock().unwrap();
-        let now_ms = self.now_ms();
-        entries.retain(|_, room| room.is_available(now_ms));
+        self.entries.lock().unwrap().prune(self.now_ms());
+    }
+
+    pub fn invite_room(&self, token: &str) -> Option<String> {
+        // A 128-bit token is exactly 22 characters without padding.
+        if token.len() != 22 {
+            return None;
+        }
+        let entries = self.entries.lock().unwrap();
+        let room_id = entries.invite_rooms.get(token)?;
+        entries.rooms.get(room_id)?.is_available(self.now_ms()).then(|| room_id.clone())
     }
 
     pub fn create(&self, source: Source) -> Result<CreatedRoom, CreateFailure> {
@@ -273,13 +303,13 @@ impl Rooms {
             let host_token = format!("{:032x}", u128::from_be_bytes(token.try_into().unwrap()));
             let mut entries = self.entries.lock().unwrap();
             let now_ms = self.now_ms();
-            if entries.len() >= MAX_ROOMS {
-                entries.retain(|_, room| room.is_available(now_ms));
-                if entries.len() >= MAX_ROOMS {
+            if entries.rooms.len() >= MAX_ROOMS {
+                entries.prune(now_ms);
+                if entries.rooms.len() >= MAX_ROOMS {
                     return Err(CreateFailure::Full);
                 }
             }
-            let Entry::Vacant(entry) = entries.entry(room_id.clone()) else { continue };
+            let Entry::Vacant(entry) = entries.rooms.entry(room_id.clone()) else { continue };
             entry.insert(Room {
                 host_token: host_token.clone(),
                 playback: Playback { source, paused: true, position_sec: 0.0, updated_at_ms: now_ms, revision: 0 },
@@ -303,7 +333,7 @@ impl Rooms {
         }
         let mut entries = self.entries.lock().unwrap();
         let now_ms = self.now_ms();
-        let room = entries.get_mut(&room_id).filter(|room| room.is_available(now_ms))
+        let room = entries.rooms.get_mut(&room_id).filter(|room| room.is_available(now_ms))
             .ok_or(WireError::ROOM_NOT_FOUND)?;
         let identity = match host_token {
             Some(token) if bool::from(room.host_token.as_bytes().ct_eq(token.as_bytes())) => Identity::Host,
@@ -347,12 +377,13 @@ pub struct Participant {
 impl Participant {
     pub fn command(&self, msg: ClientMessage) -> Result<(), WireError> {
         let mut entries = self.rooms.entries.lock().unwrap();
-        let room = entries.get_mut(&self.room_id).expect("joined room cannot expire");
+        let Registry { rooms, invite_rooms } = &mut *entries;
+        let room = rooms.get_mut(&self.room_id).expect("joined room cannot expire");
         let update = match msg {
             ClientMessage::Load { .. } | ClientMessage::CreateInvitation | ClientMessage::SetGuestControl { .. }
                 if !matches!(self.identity, Identity::Host) => return Err(WireError::FORBIDDEN),
             ClientMessage::CreateInvitation => {
-                room.create_invitation(&self.room_id)?;
+                room.create_invitation(&self.room_id, invite_rooms)?;
                 Update::AccessChanged
             }
             ClientMessage::SetGuestControl { guest_number, can_control } => {
@@ -380,7 +411,7 @@ impl Participant {
 
     pub fn access(&self) -> Utf8Bytes {
         let entries = self.rooms.entries.lock().unwrap();
-        self.encode_access(&entries[&self.room_id])
+        self.encode_access(&entries.rooms[&self.room_id])
     }
 
     fn encode_access(&self, room: &Room) -> Utf8Bytes {
@@ -389,7 +420,7 @@ impl Participant {
 
     pub fn resync(&self) -> (broadcast::Receiver<Update>, Utf8Bytes, Utf8Bytes) {
         let entries = self.rooms.entries.lock().unwrap();
-        let room = &entries[&self.room_id];
+        let room = &entries.rooms[&self.room_id];
         let state = encode(ServerMessage::State { state: &room.playback, server_now_ms: self.rooms.now_ms() });
         (room.updates.subscribe(), self.encode_access(room), state)
     }
@@ -398,7 +429,7 @@ impl Participant {
 impl Drop for Participant {
     fn drop(&mut self) {
         let mut entries = self.rooms.entries.lock().unwrap();
-        let room = entries.get_mut(&self.room_id).expect("joined room cannot expire");
+        let room = entries.rooms.get_mut(&self.room_id).expect("joined room cannot expire");
         room.participants -= 1;
         if room.participants == 0 {
             room.last_empty_ms = self.rooms.now_ms();
@@ -585,12 +616,16 @@ mod tests {
 
         tokio::time::advance(Duration::from_millis(ROOM_TTL_MS)).await;
         rooms.prune();
+        assert_eq!(rooms.invite_room(token).as_deref(), Some(id.as_str()));
         drop(host);
         drop(guest);
         assert!(rooms.join(id.clone(), None, Some(token)).is_ok());
         tokio::time::advance(Duration::from_millis(ROOM_TTL_MS)).await;
         assert!(matches!(rooms.join(id.clone(), None, Some(token)), Err(e) if e.code == "room_not_found"));
+        assert!(rooms.invite_room(token).is_none());
         rooms.prune();
-        assert!(rooms.entries.lock().unwrap().is_empty());
+        let registry = rooms.entries.lock().unwrap();
+        assert!(registry.rooms.is_empty());
+        assert!(registry.invite_rooms.is_empty());
     }
 }
