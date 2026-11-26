@@ -2,7 +2,7 @@ import { PlayIcon } from '@radix-ui/react-icons'
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
 import { mountVideo, mountYouTube } from './media'
-import type { MediaPlayer } from './media'
+import type { MediaPlayer, TrackChoices } from './media'
 import type { Command, RoomState } from './room'
 import { needsSeek, positionAt } from './timing'
 
@@ -70,6 +70,7 @@ export function Player({ state, serverNow, canControl, connected, send }: Props)
   const type = state.source.type
   const uri = type === 'youtube' ? state.source.videoId : state.source.url
   const video = useRef<HTMLVideoElement>(null)
+  const captions = useRef<HTMLDivElement>(null)
   const youtube = useRef<HTMLDivElement>(null)
   const player = useRef<MediaPlayer | null>(null)
   const snapshot = useRef(state)
@@ -84,6 +85,7 @@ export function Player({ state, serverNow, canControl, connected, send }: Props)
   const [failure, setFailure] = useState('')
   const [duration, setDuration] = useState(0)
   const [attempt, setAttempt] = useState(0)
+  const [tracks, setTracks] = useState<TrackChoices>({})
 
   const sync = useCallback((immediate: boolean, gesture = false) => {
     const media = player.current
@@ -133,6 +135,7 @@ export function Player({ state, serverNow, canControl, connected, send }: Props)
     function fail(message: string) {
       updateMode('failed')
       setFailure(message)
+      setTracks({})
       stop()
     }
     const loading = window.setTimeout(() => fail('Плеер не загрузился. Проверьте доступ к источнику и попробуйте ещё раз.'), 25_000)
@@ -175,7 +178,8 @@ export function Player({ state, serverNow, canControl, connected, send }: Props)
       },
       failed: fail,
     }
-    close = type === 'youtube' ? mountYouTube(youtube.current!, uri, events) : mountVideo(video.current!, type, uri, events)
+    close = type === 'youtube' ? mountYouTube(youtube.current!, uri, events)
+      : mountVideo(video.current!, type, uri, { ...events, tracks: setTracks }, captions.current)
     if (modeRef.current === 'failed') stop()
     return stop
   }, [attempt, type, uri, sync])
@@ -224,7 +228,9 @@ export function Player({ state, serverNow, canControl, connected, send }: Props)
   return (
     <section className="player" aria-label="Видео комнаты">
       <div className="screen" aria-busy={mode === 'loading'}>
-        {type === 'youtube' ? <div className="youtube-frame" ref={youtube} /> : <video ref={video} controls playsInline preload="metadata" aria-label="Видео комнаты" />}
+        {type === 'youtube' ? <div className="youtube-frame" ref={youtube} /> :
+          <video ref={video} controls playsInline disableRemotePlayback={type === 'dash'} preload="metadata" aria-label="Видео комнаты" />}
+        {type === 'dash' && <div ref={captions} className="pointer-events-none z-1" aria-hidden="true" />}
         {mode === 'loading' && <div className="screen-message" role="status"><div className="skeleton" />Загружаем плеер…</div>}
         {mode === 'failed' && <div className="screen-message error-message" role="alert">{failure}</div>}
       </div>
@@ -232,6 +238,22 @@ export function Player({ state, serverNow, canControl, connected, send }: Props)
         {mode === 'failed' && <button type="button" className="button" onClick={retry}>Повторить загрузку</button>}
         {(mode === 'ready' || mode === 'blocked') && <button type="button" className="button primary" onClick={activate}><PlayIcon aria-hidden="true" />Смотреть</button>}
         <p aria-live="polite">{note}</p>
+      </div>}
+      {mode !== 'loading' && mode !== 'failed' && (tracks.audio || tracks.subtitles) && <div className="player-note">
+        {(['audio', 'subtitles'] as const).map((kind) => {
+          const menu = tracks[kind]
+          if (!menu) return null
+          return (
+            <label key={kind} className="flex min-w-0 items-center gap-2">
+              {kind === 'audio' ? 'Аудиодорожка' : 'Субтитры'}
+              <select className="min-h-11 min-w-0 rounded-lg border border-line bg-surface px-2 text-ink"
+                value={menu.selected} onChange={(event) => menu.select(Number(event.target.value))}>
+                {kind === 'subtitles' && <option value={-1}>Выключены</option>}
+                {menu.labels.map((label, index) => <option key={index} value={index}>{label}</option>)}
+              </select>
+            </label>
+          )
+        })}
       </div>}
       {canControl && <RoomPlayback {...{ state, serverNow, duration, connected, play, send }} />}
     </section>

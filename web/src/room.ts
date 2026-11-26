@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 
-export type Source = { type: 'youtube'; videoId: string } | { type: 'mp4' | 'hls'; url: string }
+export type Source = { type: 'youtube'; videoId: string } | { type: 'mp4' | 'hls' | 'dash'; url: string }
 export type RoomState = {
   source: Source
   paused: boolean
@@ -34,7 +34,9 @@ export function joinMessage(inviteToken: string | null, readHostToken: () => str
 
 export function errorText(code: string): string {
   switch (code) {
-    case 'invalid_source': return 'Эта ссылка не поддерживается. Вставьте ссылку YouTube или прямую HTTPS-ссылку на MP4 или HLS (.m3u8).'
+    case 'invalid_source': return 'Вставьте ссылку YouTube, прямую ссылку MP4, HLS или DASH, либо публичную HTTPS-страницу с видео.'
+    case 'stream_not_found': return 'Не удалось найти доступный поток.'
+    case 'extractor_busy': return 'Поиск видео занят. Попробуйте ещё раз.'
     case 'room_not_found': return 'Комната больше недоступна. Попросите ведущего прислать новое приглашение.'
     case 'invalid_host_token': return 'Права ведущего не подтверждены. Для входа в комнату нужно приглашение.'
     case 'invalid_guest_token': return 'Для входа в комнату нужна действующая ссылка-приглашение. Попросите её у ведущего.'

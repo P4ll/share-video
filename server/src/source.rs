@@ -1,7 +1,7 @@
 use serde::Serialize;
 use url::{Host, Url};
 
-const MAX_URL_BYTES: usize = 4096;
+pub(crate) const MAX_URL_BYTES: usize = 4096;
 
 #[derive(Serialize)]
 #[serde(tag = "type", rename_all = "snake_case", rename_all_fields = "camelCase")]
@@ -9,34 +9,17 @@ pub enum Source {
     Youtube { video_id: String },
     Mp4 { url: String },
     Hls { url: String },
+    Dash { url: String },
 }
 
 impl Source {
     pub fn parse(input: &str) -> Option<Self> {
-        if input.len() > MAX_URL_BYTES {
-            return None;
-        }
-        let input = input.trim();
-        let (scheme, address) = input.split_once("://")?;
-        if !scheme.eq_ignore_ascii_case("https") && !scheme.eq_ignore_ascii_case("http") {
-            return None;
-        }
-        let authority = address.split(['/', '?', '#']).next()?;
-        if authority.is_empty()
-            || authority.contains('@')
-            || input.bytes().any(|b| b.is_ascii_control() || b == b'\\')
-        {
-            return None;
-        }
-        let url = Url::parse(input).ok()?;
+        let (url, _) = parse_web_url(input)?;
         let host = url.host()?;
         match url.scheme() {
             "https" => {}
             "http" if is_loopback(host) => {}
             _ => return None,
-        }
-        if url.as_str().len() > MAX_URL_BYTES {
-            return None;
         }
 
         match url.host_str()? {
@@ -67,13 +50,58 @@ impl Source {
             _ => {}
         }
 
+        Format::from_path(&url).map(|format| format.source(url))
+    }
+}
+
+pub(crate) fn parse_web_url(input: &str) -> Option<(Url, &str)> {
+    if input.len() > MAX_URL_BYTES {
+        return None;
+    }
+    let input = input.trim();
+    let (scheme, address) = input.split_once("://")?;
+    if !scheme.eq_ignore_ascii_case("https") && !scheme.eq_ignore_ascii_case("http") {
+        return None;
+    }
+    let authority = address.split(['/', '?', '#']).next()?;
+    if authority.is_empty() || authority.contains('@') || has_unsafe_chars(input) {
+        return None;
+    }
+    let url = Url::parse(input).ok()?;
+    (url.as_str().len() <= MAX_URL_BYTES).then_some((url, authority))
+}
+
+pub(crate) fn has_unsafe_chars(input: &str) -> bool {
+    input.bytes().any(|b| b.is_ascii_control() || b == b'\\')
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Format {
+    Mp4,
+    Hls,
+    Dash,
+}
+
+impl Format {
+    pub(crate) fn from_path(url: &Url) -> Option<Self> {
         let (_, ext) = url.path().rsplit_once('.')?;
         if ext.eq_ignore_ascii_case("mp4") {
-            Some(Self::Mp4 { url: url.into() })
+            Some(Self::Mp4)
         } else if ext.eq_ignore_ascii_case("m3u8") {
-            Some(Self::Hls { url: url.into() })
+            Some(Self::Hls)
+        } else if ext.eq_ignore_ascii_case("mpd") {
+            Some(Self::Dash)
         } else {
             None
+        }
+    }
+
+    pub(crate) fn source(self, url: Url) -> Source {
+        let url = url.into();
+        match self {
+            Self::Mp4 => Source::Mp4 { url },
+            Self::Hls => Source::Hls { url },
+            Self::Dash => Source::Dash { url },
         }
     }
 }
@@ -126,6 +154,8 @@ mod tests {
     fn accepts_direct_formats_over_https_and_http_loopback_without_credentials() {
         let signed = "https://media.example/show.MP4?signature=a%2Fb";
         assert!(matches!(Source::parse(signed), Some(Source::Mp4 { url }) if url == signed));
+        let dash = "https://media.example/show.MPD?signature=a%2Fb";
+        assert!(matches!(Source::parse(dash), Some(Source::Dash { url }) if url == dash));
         for url in [
             "http://localhost:8081/live.m3u8",
             "http://127.0.0.2/live.m3u8",

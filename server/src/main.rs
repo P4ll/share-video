@@ -1,3 +1,4 @@
+mod extractor;
 mod rooms;
 mod source;
 
@@ -19,7 +20,7 @@ use tokio::{
 use tower_http::{services::{ServeDir, ServeFile}, set_header::SetResponseHeaderLayer};
 
 use rooms::{Admission, ClientMessage, CreateFailure, Rooms, ServerMessage, Update, WireError, encode};
-use source::Source;
+use extractor::{Extractor, ResolveError};
 
 const MAX_MESSAGE_BYTES: usize = 8192;
 const MAX_SOCKETS: usize = 512;
@@ -33,6 +34,7 @@ const SWEEP_INTERVAL: Duration = Duration::from_secs(60);
 struct App {
     rooms: Arc<Rooms>,
     sockets: Arc<Semaphore>,
+    extractor: Extractor,
 }
 
 #[tokio::main]
@@ -41,7 +43,11 @@ async fn main() -> std::io::Result<()> {
     let static_dir = PathBuf::from(env::var_os("STATIC_DIR").unwrap_or_else(|| "web/dist".into()));
     let listener = TcpListener::bind(bind_addr).await?;
     let rooms = Arc::new(Rooms::new());
-    let app = App { rooms: Arc::clone(&rooms), sockets: Arc::new(Semaphore::new(MAX_SOCKETS)) };
+    let app = App {
+        rooms: Arc::clone(&rooms),
+        sockets: Arc::new(Semaphore::new(MAX_SOCKETS)),
+        extractor: Extractor::default(),
+    };
     tokio::spawn(async move {
         let mut ticks = interval(SWEEP_INTERVAL);
         loop {
@@ -75,8 +81,16 @@ async fn create_room(State(app): State<App>, body: Result<Json<CreateRoom>, Json
         Ok(body) => body,
         Err(error) => return (error.status(), Json(WireError::INVALID_MESSAGE)).into_response(),
     };
-    let Some(source) = Source::parse(&url) else {
-        return (StatusCode::BAD_REQUEST, Json(WireError::INVALID_SOURCE)).into_response();
+    let source = match app.extractor.resolve(&url).await {
+        Ok(source) => source,
+        Err(error) => {
+            let status = match &error {
+                ResolveError::Invalid => StatusCode::BAD_REQUEST,
+                ResolveError::Unavailable => StatusCode::UNPROCESSABLE_ENTITY,
+                ResolveError::Busy => StatusCode::TOO_MANY_REQUESTS,
+            };
+            return (status, Json(WireError::from(error))).into_response();
+        }
     };
     match app.rooms.create(source) {
         Ok(created) => (StatusCode::CREATED, [(header::CACHE_CONTROL, "no-store")], Json(created)).into_response(),
@@ -164,7 +178,7 @@ async fn upgrade(
         .max_frame_size(MAX_MESSAGE_BYTES)
         .on_upgrade(move |socket| async move {
             let _slot = slot;
-            serve_socket(socket, app.rooms, room_id).await;
+            serve_socket(socket, app.rooms, app.extractor, room_id).await;
         })
 }
 
@@ -182,7 +196,7 @@ async fn close_with_error(socket: &mut WebSocket, error: WireError) {
     }
 }
 
-async fn serve_socket(mut socket: WebSocket, rooms: Arc<Rooms>, room_id: String) {
+async fn serve_socket(mut socket: WebSocket, rooms: Arc<Rooms>, extractor: Extractor, room_id: String) {
     let first = match timeout(JOIN_TIMEOUT, socket.recv()).await {
         Err(_) => {
             return close_with_error(&mut socket, WireError::new("invalid_message", "Время ожидания входа истекло.")).await;
@@ -239,6 +253,7 @@ async fn serve_socket(mut socket: WebSocket, rooms: Arc<Rooms>, room_id: String)
                             server_now_ms: rooms.now_ms(),
                         })),
                         Ok(ClientMessage::Join { .. }) | Err(_) => Some(error_message(WireError::INVALID_MESSAGE)),
+                        Ok(ClientMessage::Load { url }) => participant.load(&url, &extractor).await.err().map(error_message),
                         Ok(command) => participant.command(command).err().map(error_message),
                     },
                     _ => Some(error_message(WireError::INVALID_MESSAGE)),

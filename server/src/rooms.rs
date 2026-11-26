@@ -10,7 +10,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use subtle::ConstantTimeEq;
 use tokio::{sync::broadcast, time::Instant};
 
-use crate::source::Source;
+use crate::{extractor::{Extractor, ResolveError}, source::Source};
 
 const MAX_ROOMS: usize = 256;
 const MAX_PARTICIPANTS: usize = 24;
@@ -47,7 +47,7 @@ pub struct WireError {
 }
 
 impl WireError {
-    pub const INVALID_SOURCE: Self = Self::new("invalid_source", "Укажите ссылку на YouTube, MP4 или HLS.");
+    const INVALID_SOURCE: Self = Self::new("invalid_source", "Укажите поддерживаемую ссылку на видео или HTTPS-страницу.");
     pub const INVALID_MESSAGE: Self = Self::new("invalid_message", "Некорректное сообщение.");
     const ROOM_NOT_FOUND: Self = Self::new("room_not_found", "Комната не найдена или уже закрыта.");
     const INVALID_HOST_TOKEN: Self = Self::new("invalid_host_token", "Неверный ключ ведущего.");
@@ -58,6 +58,16 @@ impl WireError {
 
     pub const fn new(code: &'static str, message: &'static str) -> Self {
         Self { code, message }
+    }
+}
+
+impl From<ResolveError> for WireError {
+    fn from(error: ResolveError) -> Self {
+        match error {
+            ResolveError::Invalid => Self::INVALID_SOURCE,
+            ResolveError::Unavailable => Self::new("stream_not_found", "Не удалось найти доступный поток."),
+            ResolveError::Busy => Self::new("extractor_busy", "Поиск видео занят. Попробуйте ещё раз."),
+        }
     }
 }
 
@@ -138,9 +148,6 @@ impl TryFrom<ClientMessage> for PlaybackChange {
 
     fn try_from(message: ClientMessage) -> Result<Self, Self::Error> {
         match message {
-            ClientMessage::Load { url } => Source::parse(&url)
-                .map(Self::Load)
-                .ok_or(WireError::INVALID_SOURCE),
             ClientMessage::Play => Ok(Self::SetPaused(false)),
             ClientMessage::Pause => Ok(Self::SetPaused(true)),
             ClientMessage::Seek { position_sec } if position_sec.is_finite() && position_sec >= 0.0 => {
@@ -198,6 +205,11 @@ struct Room {
 }
 
 impl Room {
+    fn change(&mut self, change: PlaybackChange, server_now_ms: u64) -> Update {
+        self.playback.apply(change, server_now_ms);
+        Update::Playback(encode(ServerMessage::State { state: &self.playback, server_now_ms }))
+    }
+
     fn is_available(&self, now_ms: u64) -> bool {
         self.participants > 0 || now_ms - self.last_empty_ms < ROOM_TTL_MS
     }
@@ -375,12 +387,24 @@ pub struct Participant {
 }
 
 impl Participant {
+    pub async fn load(&self, url: &str, extractor: &Extractor) -> Result<(), WireError> {
+        if !matches!(self.identity, Identity::Host) {
+            return Err(WireError::FORBIDDEN);
+        }
+        let source = extractor.resolve(url).await?;
+        let mut entries = self.rooms.entries.lock().unwrap();
+        let room = entries.rooms.get_mut(&self.room_id).expect("joined room cannot expire");
+        let update = room.change(PlaybackChange::Load(source), self.rooms.now_ms());
+        let _ = room.updates.send(update);
+        Ok(())
+    }
+
     pub fn command(&self, msg: ClientMessage) -> Result<(), WireError> {
         let mut entries = self.rooms.entries.lock().unwrap();
         let Registry { rooms, invite_rooms } = &mut *entries;
         let room = rooms.get_mut(&self.room_id).expect("joined room cannot expire");
         let update = match msg {
-            ClientMessage::Load { .. } | ClientMessage::CreateInvitation | ClientMessage::SetGuestControl { .. }
+            ClientMessage::CreateInvitation | ClientMessage::SetGuestControl { .. }
                 if !matches!(self.identity, Identity::Host) => return Err(WireError::FORBIDDEN),
             ClientMessage::CreateInvitation => {
                 room.create_invitation(&self.room_id, invite_rooms)?;
@@ -399,10 +423,7 @@ impl Participant {
                 if let Identity::Guest(index) = self.identity && !room.invitations[index].can_control {
                     return Err(WireError::FORBIDDEN);
                 }
-                let change = PlaybackChange::try_from(msg)?;
-                let server_now_ms = self.rooms.now_ms();
-                room.playback.apply(change, server_now_ms);
-                Update::Playback(encode(ServerMessage::State { state: &room.playback, server_now_ms }))
+                room.change(PlaybackChange::try_from(msg)?, self.rooms.now_ms())
             }
         };
         let _ = room.updates.send(update);
@@ -557,8 +578,9 @@ mod tests {
         assert_eq!(playback(&mut second)["state"]["paused"], false);
         first.participant.command(ClientMessage::Pause).unwrap();
         assert_eq!(playback(&mut second)["state"]["paused"], true);
+        let extractor = Extractor::default();
+        assert_eq!(first.participant.load("https://media.example/other.mp4", &extractor).await.unwrap_err().code, "forbidden");
         for command in [
-            ClientMessage::Load { url: "https://media.example/other.mp4".into() },
             ClientMessage::CreateInvitation,
             ClientMessage::SetGuestControl { guest_number: 2, can_control: true },
         ] {
@@ -576,6 +598,27 @@ mod tests {
         let rejoined = rooms.join(id.clone(), None, Some(first_token)).unwrap();
         assert_eq!(json(&rejoined.snapshot)["guestNumber"], 1);
         assert_eq!(json(&rejoined.snapshot)["canControl"], false);
+    }
+
+    #[tokio::test]
+    async fn failed_load_preserves_the_room_and_dash_load_reaches_guests() {
+        let (rooms, created) = room();
+        let id = &created.room_id;
+        let mut host = rooms.join(id.clone(), Some(&created.host_token), None).unwrap();
+        let invitation = invite(&mut host);
+        let mut guest = rooms.join(id.clone(), None, invitation["token"].as_str()).unwrap();
+        host.participant.command(ClientMessage::Seek { position_sec: 30.0 }).unwrap();
+        let before = playback(&mut guest);
+        let extractor = Extractor::default();
+        assert!(host.participant.load("http://media.example/page", &extractor).await.is_err());
+        assert!(matches!(guest.updates.try_recv(), Err(TryRecvError::Empty)));
+        assert_eq!(json(&guest.participant.resync().2)["state"], before["state"]);
+
+        host.participant.load("https://media.example/other.mpd", &extractor).await.unwrap();
+        let after = playback(&mut guest);
+        assert_eq!(after["state"]["source"], json!({"type": "dash", "url": "https://media.example/other.mpd"}));
+        assert_eq!(after["state"]["positionSec"], 0.0);
+        assert_eq!(after["state"]["paused"], true);
     }
 
     #[test]

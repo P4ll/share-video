@@ -45,7 +45,7 @@ function CreateRoom() {
           <VideoLink id="source" value={url} onChange={setUrl} disabled={pending} />
           <button className="button primary" type="submit" disabled={pending}>{pending ? 'Создаём…' : 'Создать комнату'}</button>
         </div>
-        <p className="help">YouTube или прямая ссылка на MP4 или HLS (.m3u8). Только записи, не трансляции.</p>
+        <p className="help">YouTube, прямая ссылка MP4, HLS или DASH, либо HTTPS-страница с открытым видео. Только записи.</p>
         {error && <p className="form-error" role="alert">{error}</p>}
       </form>
     </main>
@@ -106,7 +106,7 @@ function Invite({ invitation, connected, setControl }: {
 const connection = {
   connecting: 'Подключаемся…', connected: 'На связи', reconnecting: 'Переподключаемся…', offline: 'Нет сети', closed: 'Нет доступа',
 }
-const sourceNames = { youtube: 'YouTube', mp4: 'Прямой MP4', hls: 'HLS-запись' }
+const sourceNames = { youtube: 'YouTube', mp4: 'Прямой MP4', hls: 'HLS-запись', dash: 'DASH-запись' }
 
 function Room({ roomId, inviteToken }: { roomId: string; inviteToken: string | null }) {
   const { status, state, role, canControl, guestNumber, invitations, serverNow, error, send } = useRoom(roomId, inviteToken)
